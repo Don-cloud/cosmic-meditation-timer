@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=Meditation Countdown Timer
+Comment=Countdown timer with meditation bell alert
+Exec=cosmic-meditation-timer
+Icon=cosmic-meditation-timer
+Terminal=false
+Type=Application
+Categories=Utility;
