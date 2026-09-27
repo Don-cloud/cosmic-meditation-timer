@@ -1,4 +1,6 @@
 use std::f32::consts::PI;
+use std::fs;
+use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
 
@@ -24,7 +26,17 @@ enum Message {
     ResetPressed,
     ToggleAbout,
     ToggleDeveloper,
+    PresetNameChanged(String),
+    SavePresetPressed,
+    LoadPreset(usize),
+    DeletePreset(usize),
     Tick,
+}
+
+#[derive(Clone, Debug)]
+struct Preset {
+    name: String,
+    seconds: u64,
 }
 
 struct TimerApp {
@@ -36,6 +48,8 @@ struct TimerApp {
     status: String,
     show_about: bool,
     show_developer: bool,
+    preset_name: String,
+    presets: Vec<Preset>,
 }
 
 impl Application for TimerApp {
@@ -55,6 +69,8 @@ impl Application for TimerApp {
                 status: String::from("Enter a duration and press Start."),
                 show_about: false,
                 show_developer: false,
+                preset_name: String::new(),
+                presets: load_presets(),
             },
             Command::none(),
         )
@@ -125,6 +141,102 @@ impl Application for TimerApp {
             }
             Message::ToggleDeveloper => {
                 self.show_developer = !self.show_developer;
+            }
+            Message::PresetNameChanged(value) => {
+                if !self.running {
+                    self.preset_name = value.chars().filter(|c| *c != '\n' && *c != '\r').collect();
+                }
+            }
+            Message::SavePresetPressed => {
+                if self.running {
+                    self.status = String::from("Pause before saving a preset.");
+                    return Command::none();
+                }
+
+                let trimmed_name = self.preset_name.trim();
+                if trimmed_name.is_empty() {
+                    self.status = String::from("Enter a preset name.");
+                    return Command::none();
+                }
+
+                let duration =
+                    match parse_total_duration(&self.input_hours, &self.input_minutes, &self.input_seconds) {
+                        Some(d) if !d.is_zero() => d,
+                        Some(_) => {
+                            self.status = String::from("Set at least 1 second before saving.");
+                            return Command::none();
+                        }
+                        None => {
+                            self.status = String::from("Duration is too large.");
+                            return Command::none();
+                        }
+                    };
+
+                let seconds = duration.as_secs();
+                if let Some(existing) = self.presets.iter_mut().find(|p| p.name == trimmed_name) {
+                    existing.seconds = seconds;
+                    match persist_presets(&self.presets) {
+                        Ok(()) => {
+                            self.status =
+                                format!("Updated preset '{trimmed_name}' ({})", format_duration(duration));
+                        }
+                        Err(err) => {
+                            self.status = format!("Could not save preset: {err}");
+                        }
+                    }
+                } else {
+                    self.presets.push(Preset {
+                        name: trimmed_name.to_string(),
+                        seconds,
+                    });
+                    match persist_presets(&self.presets) {
+                        Ok(()) => {
+                            self.status =
+                                format!("Saved preset '{trimmed_name}' ({})", format_duration(duration));
+                        }
+                        Err(err) => {
+                            self.status = format!("Could not save preset: {err}");
+                        }
+                    }
+                }
+            }
+            Message::LoadPreset(index) => {
+                if self.running {
+                    self.status = String::from("Pause before loading a preset.");
+                    return Command::none();
+                }
+
+                if let Some(preset) = self.presets.get(index).cloned() {
+                    let h = preset.seconds / 3600;
+                    let m = (preset.seconds % 3600) / 60;
+                    let s = preset.seconds % 60;
+
+                    self.input_hours = h.to_string();
+                    self.input_minutes = m.to_string();
+                    self.input_seconds = s.to_string();
+                    self.remaining = Duration::ZERO;
+                    self.status =
+                        format!("Loaded preset '{}' ({})", preset.name, format_duration(Duration::from_secs(preset.seconds)));
+                }
+            }
+            Message::DeletePreset(index) => {
+                if self.running {
+                    self.status = String::from("Pause before deleting a preset.");
+                    return Command::none();
+                }
+
+                if index < self.presets.len() {
+                    let name = self.presets[index].name.clone();
+                    self.presets.remove(index);
+                    match persist_presets(&self.presets) {
+                        Ok(()) => {
+                            self.status = format!("Deleted preset '{name}'.");
+                        }
+                        Err(err) => {
+                            self.status = format!("Deleted locally, but save failed: {err}");
+                        }
+                    }
+                }
             }
             Message::Tick => {
                 if self.running {
@@ -200,6 +312,38 @@ impl Application for TimerApp {
             .padding(10)
             .on_press(Message::ToggleDeveloper);
 
+        let preset_name_input = text_input("Preset name (e.g. 10m sit)", &self.preset_name)
+            .on_input(Message::PresetNameChanged)
+            .padding(10)
+            .width(Length::FillPortion(2));
+
+        let save_preset_button = button("Save Preset")
+            .padding(10)
+            .on_press(Message::SavePresetPressed);
+
+        let mut presets_column = column![text("Saved Presets").size(20)].spacing(8);
+        if self.presets.is_empty() {
+            presets_column = presets_column.push(text("No presets saved yet.").size(15));
+        } else {
+            for (index, preset) in self.presets.iter().enumerate() {
+                presets_column = presets_column.push(
+                    row![
+                        button(text(format!(
+                            "Load {} ({})",
+                            preset.name,
+                            format_duration(Duration::from_secs(preset.seconds))
+                        )))
+                        .padding(8)
+                        .on_press(Message::LoadPreset(index)),
+                        button("Delete")
+                            .padding(8)
+                            .on_press(Message::DeletePreset(index)),
+                    ]
+                    .spacing(8),
+                );
+            }
+        }
+
         let mut content = column![
             text(APP_NAME).size(34),
             text(format!("Version {APP_VERSION}")).size(16),
@@ -207,6 +351,10 @@ impl Application for TimerApp {
             inputs,
             timer_text,
             row![start_button, pause_button, reset_button].spacing(10),
+            row![preset_name_input, save_preset_button]
+                .spacing(10)
+                .align_items(Alignment::Center),
+            presets_column,
             row![about_button, developer_button].spacing(10),
             text(&self.status).size(16)
         ];
@@ -355,4 +503,57 @@ fn add_bell_strike(
 
         output[idx] += envelope * (fundamental + harmonic_2 + harmonic_3 + shimmer) / 1.75;
     }
+}
+
+fn presets_path() -> Result<PathBuf, String> {
+    let home = std::env::var_os("HOME").ok_or_else(|| String::from("HOME not set"))?;
+    Ok(PathBuf::from(home)
+        .join(".config")
+        .join("cosmic-meditation-timer")
+        .join("presets.txt"))
+}
+
+fn load_presets() -> Vec<Preset> {
+    let path = match presets_path() {
+        Ok(path) => path,
+        Err(_) => return Vec::new(),
+    };
+
+    let contents = match fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut presets = Vec::new();
+    for line in contents.lines() {
+        let mut parts = line.splitn(2, '\t');
+        let name = match parts.next() {
+            Some(name) if !name.trim().is_empty() => name.trim().to_string(),
+            _ => continue,
+        };
+        let seconds = match parts.next().and_then(|s| s.parse::<u64>().ok()) {
+            Some(seconds) if seconds > 0 => seconds,
+            _ => continue,
+        };
+        presets.push(Preset { name, seconds });
+    }
+
+    presets
+}
+
+fn persist_presets(presets: &[Preset]) -> Result<(), String> {
+    let path = presets_path()?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| String::from("Invalid presets path"))?;
+
+    fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+
+    let mut data = String::new();
+    for preset in presets {
+        let safe_name = preset.name.replace('\t', " ").replace('\n', " ").replace('\r', " ");
+        data.push_str(&format!("{}\t{}\n", safe_name.trim(), preset.seconds));
+    }
+
+    fs::write(path, data).map_err(|e| e.to_string())
 }

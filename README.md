@@ -8,6 +8,7 @@ Happy Meditation!
 - Enter `Hours`, `Minutes`, and/or `Seconds`
 - Start, pause, and reset countdown
 - Live `HH:MM:SS` display
+- Save named presets and load/delete them later
 - Plays a synthesized meditation-style bell when timer reaches zero
 
 ## Prerequisites (Pop!_OS 24.04)
